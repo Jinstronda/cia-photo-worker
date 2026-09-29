@@ -83,10 +83,10 @@ def drive_put(svc, folder_id, name, data: bytes, mime="application/octet-stream"
 
 
 def fetch(pid, sess):
-    r = sess.get(f"{BASE}?codpess={pid}&codunid={UNIT}", timeout=40)
+    r = sess.get(f"{BASE}?codpess={pid}&codunid={UNIT}", timeout=15)
     if r.status_code == 200 and len(r.content) != PLACEHOLDER_SIZE and len(r.content) > 5000:
-        return r.content
-    return None
+        return r.content, 200
+    return None, r.status_code
 
 
 def main():
@@ -104,11 +104,19 @@ def main():
     batch = {}          # pid -> bytes
     manifest_batch = []  # pid, size records for the batch
     backoff = 1.0
+    status_counts = {}
+
+    # immediate liveness marker
+    import datetime
+    state["started_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    drive_put(svc, folder, "state.json", json.dumps(state).encode(), "application/json")
+    log("[*] state.json written (liveness marker)")
 
     pid = state["next_id"]
     while pid <= MAX_ID:
         try:
-            content = fetch(pid, sess)
+            content, code = fetch(pid, sess)
+            status_counts[code] = status_counts.get(code, 0) + 1
             backoff = 1.0
         except Exception as e:
             log(f"[!] err pid={pid}: {e}; sleeping {backoff:.0f}s")
@@ -143,11 +151,11 @@ def main():
                 batch, manifest_batch = {}, []
                 buf.close()
 
-        if state["scanned"] % 2000 == 0:
-            drive_put(svc, folder, "state.json",
-                     json.dumps(state).encode(), "application/json")
-            log(f"[*] checkpoint: scanned={state['scanned']} photos={state['photos']} "
-                f"next_id={state['next_id']} batches={state['batches']}")
+        if state["scanned"] % 100 == 0:
+            state["http"] = {str(k): v for k, v in status_counts.items()}
+            drive_put(svc, folder, "state.json", json.dumps(state).encode(), "application/json")
+            log(f"[*] heartbeat: scanned={state['scanned']} photos={state['photos']} "
+                f"next_id={state['next_id']} http={status_counts}")
 
     # final flush + state
     if batch:
